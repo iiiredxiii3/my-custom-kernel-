@@ -1,4 +1,4 @@
-name: Build Volla Kernel (Permissive + Full Droidspaces + GKI Patches)
+name: Build Volla 16 Kernel (Permissive + Droidspaces + GKI)
 
 on:
   workflow_dispatch:
@@ -10,17 +10,13 @@ jobs:
     - name: Checkout Kernel Source
       uses: actions/checkout@v4
       with:
-        repository: IIIMGHIII/android_kernel_volla_mt6877
-      
+        repository: HelloVolla/android_kernel_volla_mt6877
+        ref: volla-16.0
 
-    - name: Install Dependencies
+    - name: Install Dependencies & System Clang
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl
-
-    - name: Clone Proton Clang Toolchain
-      run: |
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang.git toolchain
+        sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl clang lld llvm gcc-aarch64-linux-gnu
 
     - name: Patch SELinux to Permissive
       run: |
@@ -50,7 +46,6 @@ jobs:
 
     - name: Configure Kernel & Enable ALL Droidspaces Features
       run: |
-        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
@@ -59,7 +54,7 @@ jobs:
         export LLVM=1
         export LLVM_IAS=1
         
-        # Load default config
+        # Load default config (volla-16.0 might use a slightly different name, fallback to defconfig)
         make O=out mt6877_volla_defconfig || make O=out vendor/volla_quintus_defconfig || make O=out defconfig
         
         # --- IPC ---
@@ -101,7 +96,6 @@ jobs:
 
     - name: Build Kernel
       run: |
-        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
@@ -115,5 +109,5 @@ jobs:
     - name: Upload Kernel Image
       uses: actions/upload-artifact@v4
       with:
-        name: Volla-Permissive-FullDroidspaces-GKI-Kernel
+        name: Volla-16-Permissive-Droidspaces-Kernel
         path: out/arch/arm64/boot/Image.gz
