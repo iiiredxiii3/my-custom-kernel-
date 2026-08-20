@@ -1,4 +1,4 @@
-name: Build Volla Kernel (Permissive + Full Droidspaces)
+name: Build Volla Kernel (Permissive + Full Droidspaces + GKI Patches)
 
 on:
   workflow_dispatch:
@@ -30,6 +30,23 @@ jobs:
         
         # Patch 2: Ignore userspace requests to set Enforcing mode
         sed -i 's/return -EINVAL;/return 0; \/\/ FORCED PERMISSIVE/' security/selinux/selinuxfs.c || true
+
+    - name: Patch GKI Namespace Restrictions
+      run: |
+        # GKI blocks unprivileged user namespaces by default. We must force it to 1.
+        if [ -f "kernel/sysctl.c" ]; then
+          sed -i 's/int sysctl_unprivileged_userns_clone = 0;/int sysctl_unprivileged_userns_clone = 1;/' kernel/sysctl.c || true
+        fi
+        
+        # Remove the Android-specific check that blocks unprivileged namespaces in nsproxy
+        if [ -f "kernel/cred.c" ]; then
+          sed -i '/if (capable(CAP_SYS_ADMIN) || capable(CAP_SETUID))/d' kernel/cred.c || true
+        fi
+
+        # Allow CLONE_NEWNS and CLONE_NEWPID for unprivileged users
+        if [ -f "kernel/fork.c" ]; then
+          sed -i 's/if (!capable(CAP_SYS_ADMIN) \&\& flags)/if (0 \&\& flags)/' kernel/fork.c || true
+        fi
 
     - name: Configure Kernel & Enable ALL Droidspaces Features
       run: |
@@ -98,5 +115,5 @@ jobs:
     - name: Upload Kernel Image
       uses: actions/upload-artifact@v4
       with:
-        name: Volla-Permissive-FullDroidspaces-Kernel
+        name: Volla-Permissive-FullDroidspaces-GKI-Kernel
         path: out/arch/arm64/boot/Image.gz
