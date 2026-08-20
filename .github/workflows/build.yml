@@ -1,0 +1,102 @@
+name: Build Volla Kernel (Permissive + Full Droidspaces)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Kernel Source
+      uses: actions/checkout@v4
+      with:
+        repository: IIIMGHIII/android_kernel_volla_mt6877
+        ref: main
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl
+
+    - name: Clone Proton Clang Toolchain
+      run: |
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang.git toolchain
+
+    - name: Patch SELinux to Permissive
+      run: |
+        # Patch 1: Force SELinux variable to 0 (Permissive)
+        sed -i 's/unsigned int selinux_enforcing = 1;/unsigned int selinux_enforcing = 0;/' security/selinux/hooks.c || true
+        sed -i 's/int selinux_enforcing = 1;/int selinux_enforcing = 0;/' security/selinux/hooks.c || true
+        
+        # Patch 2: Ignore userspace requests to set Enforcing mode
+        sed -i 's/return -EINVAL;/return 0; \/\/ FORCED PERMISSIVE/' security/selinux/selinuxfs.c || true
+
+    - name: Configure Kernel & Enable ALL Droidspaces Features
+      run: |
+        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=aarch64-linux-gnu-
+        export CC=clang
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # Load default config
+        make O=out mt6877_volla_defconfig || make O=out vendor/volla_quintus_defconfig || make O=out defconfig
+        
+        # --- IPC ---
+        ./scripts/config --file out/.config -e SYSVIPC
+        ./scripts/config --file out/.config -e POSIX_MQUEUE
+        
+        # --- Namespaces ---
+        ./scripts/config --file out/.config -e IPC_NS
+        ./scripts/config --file out/.config -e PID_NS
+        
+        # --- HW Access Support ---
+        ./scripts/config --file out/.config -e DEVTMPFS
+        ./scripts/config --file out/.config -e DEVTMPFS_MOUNT
+        ./scripts/config --file out/.config -e DEVPTS_FS
+        
+        # --- Networking (Enhanced NAT support) ---
+        ./scripts/config --file out/.config -e NETFILTER_XT_MATCH_ADDRTYPE
+        
+        # --- Fix for docker unsafe procfs error ---
+        ./scripts/config --file out/.config -e USER_NS
+        
+        # --- UFW support ---
+        ./scripts/config --file out/.config -e NETFILTER_XT_TARGET_REJECT
+        ./scripts/config --file out/.config -e NETFILTER_XT_TARGET_LOG
+        ./scripts/config --file out/.config -e NETFILTER_XT_MATCH_RECENT
+        
+        # --- Fail2ban support ---
+        ./scripts/config --file out/.config -e IP_SET
+        ./scripts/config --file out/.config -e IP_SET_HASH_IP
+        ./scripts/config --file out/.config -e IP_SET_HASH_NET
+        ./scripts/config --file out/.config -e NETFILTER_XT_SET
+        
+        # --- Enable xattr, posix acl support on tmpfs (NixOS support) ---
+        ./scripts/config --file out/.config -e TMPFS_POSIX_ACL
+        ./scripts/config --file out/.config -e TMPFS_XATTR
+        
+        # Resolve dependencies automatically
+        make O=out olddefconfig
+
+    - name: Build Kernel
+      run: |
+        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=aarch64-linux-gnu-
+        export CC=clang
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        make O=out -j$(nproc) Image.gz
+
+    - name: Upload Kernel Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: Volla-Permissive-FullDroidspaces-Kernel
+        path: out/arch/arm64/boot/Image.gz
