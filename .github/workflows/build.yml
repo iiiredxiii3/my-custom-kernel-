@@ -1,736 +1,167 @@
-name: Build Volla Quintus 16 Kernel
+name: Build Volla Kernel with DroidSpace Support
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
+  workflow_dispatch:        # manual start from the Actions tab
+  # push:                   # uncomment to build on every push
+  # schedule:               # or schedule a weekly build
+  #   - cron: '0 0 * * 0'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      KERNEL_BRANCH: volla-16.0
-
-      KERNEL_REPO: https://github.com/HelloVolla/android_kernel_volla_mt6877.git
-
-      DEVICE_MODULES_REPO: https://github.com/HelloVolla/android_kernel_device_modules_volla_mt6877.git
-
-      VENDOR_MODULES_REPO: https://github.com/HelloVolla/android_kernel_modules_volla_mt6877.git
-
-      MGK_RULES_REPO: https://github.com/HelloVolla/android_kernel_build_bazel_mgk_rules.git
-
-      # This is the Google Android 15 / Linux 6.6 kernel
-      # build infrastructure used as the Kleaf base.
-      GOOGLE_KERNEL_MANIFEST_BRANCH: common-android15-6.6-2024-05-exp
-
-      # Volla's currently published MGK rules branch.
-      MGK_RULES_BRANCH: volla-15.0-ansuz
+    timeout-minutes: 360    # generous timeout (6 hours)
 
     steps:
-
-      # ============================================================
-      # 1. Checkout this GitHub repository
-      # ============================================================
-      - name: Checkout build repository
-        uses: actions/checkout@v4
-
-      # ============================================================
-      # 2. Install repo
-      # ============================================================
-      - name: Install Google repo tool
-        shell: bash
+      # ------------------------------------------------------------
+      # 1. Install all required packages
+      # ------------------------------------------------------------
+      - name: Install dependencies
         run: |
-          set -eux
+          sudo apt update
+          sudo apt install -y \
+            git curl python3 python-is-python3 repo \
+            build-essential bc bison flex patch pkg-config \
+            libssl-dev libelf-dev pahole libncurses-dev \
+            zlib1g-dev libyaml-dev lz4 zstd device-tree-compiler \
+            kmod cpio rsync
 
-          mkdir -p "$HOME/bin"
-
-          curl -L \
-            https://storage.googleapis.com/git-repo-downloads/repo \
-            -o "$HOME/bin/repo"
-
-          chmod +x "$HOME/bin/repo"
-
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-
-          "$HOME/bin/repo" --version
-
-      # ============================================================
-      # 3. Install host dependencies
-      # ============================================================
-      - name: Install build dependencies
-        shell: bash
+      # ------------------------------------------------------------
+      # 2. Set up Git user (needed by repo)
+      # ------------------------------------------------------------
+      - name: Configure git
         run: |
-          set -eux
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
 
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            git \
-            curl \
-            python3 \
-            python3-pip \
-            python3-venv \
-            unzip \
-            zip \
-            rsync \
-            bc \
-            bison \
-            flex \
-            build-essential \
-            libssl-dev \
-            libelf-dev \
-            libncurses-dev \
-            libdw-dev \
-            libunwind-dev \
-            libcap-dev \
-            libcap-ng-dev \
-            cpio \
-            clang \
-            lld \
-            llvm \
-            gcc-aarch64-linux-gnu \
-            device-tree-compiler \
-            pahole
-
-          java -version
-          clang --version
-          ld.lld --version
-
-      # ============================================================
-      # 4. Initialize Google's Android 15 / Linux 6.6 manifest
-      #
-      # IMPORTANT:
-      #
-      # We DO NOT manually list projects.
-      #
-      # The manifest itself knows which projects are valid.
-      # ============================================================
-      - name: Initialize Google Linux 6.6 kernel manifest
-        shell: bash
+      # ------------------------------------------------------------
+      # 3. Initialize the kernel workspace with Google's manifest
+      # ------------------------------------------------------------
+      - name: Initialize repo
         run: |
-          set -eux
+          mkdir kernel_workspace
+          cd kernel_workspace
+          repo init -u https://android.googlesource.com/kernel/manifest.git \
+                    -b common-android15-6.6
 
-          rm -rf kernel-tree
-
-          mkdir -p kernel-tree
-
-          cd kernel-tree
-
-          repo init \
-            -u https://android.googlesource.com/kernel/manifest.git \
-            -b "$GOOGLE_KERNEL_MANIFEST_BRANCH" \
-            --depth=1
-
-          echo "===== MANIFEST ====="
-          repo manifest -r | head -100
-
-      # ============================================================
-      # 5. Sync the COMPLETE Google kernel build tree
-      #
-      # This fixes:
-      #
-      #   error: project external/stardoc not found
-      #
-      # because repo now follows the manifest instead of us
-      # manually guessing project names.
-      # ============================================================
-      - name: Sync Google kernel build tree
-        shell: bash
+      # ------------------------------------------------------------
+      # 4. Add Volla's local manifest (device‑specific repos)
+      # ------------------------------------------------------------
+      - name: Add Volla local manifest
         run: |
-          set -eux
+          cd kernel_workspace
+          git clone https://github.com/HelloVolla/android_kernel_manifest.git \
+                    -b volla-16.0-algiz .repo/local_manifests
 
-          cd kernel-tree
-
-          repo sync \
-            -c \
-            -j"$(nproc)" \
-            --no-tags \
-            --no-clone-bundle \
-            --force-sync
-
-          echo
-          echo "===== GOOGLE TREE SYNC COMPLETE ====="
-
-          echo
-          echo "===== BUILD/KERNEL ====="
-          test -d build/kernel
-          ls -la build/kernel | head -30
-
-          echo
-          echo "===== KLEAF ====="
-          test -f build/kernel/kleaf/bazel.sh
-          ls -l build/kernel/kleaf/bazel.sh
-
-          echo
-          echo "===== BAZEL ====="
-          test -e tools/bazel
-          ls -l tools/bazel
-
-          echo
-          echo "===== WORKSPACE ====="
-          test -f WORKSPACE
-
-          echo
-          echo "===== MODULE.BAZEL ====="
-          test -f MODULE.bazel
-
-      # ============================================================
-      # 6. Remove Google's generic kernel source
-      #
-      # The Google manifest puts its own kernel at:
-      #
-      #     common/
-      #
-      # Volla's build expects:
-      #
-      #     kernel-6.6/
-      #
-      # We don't want the Google generic kernel here.
-      # ============================================================
-      - name: Remove generic Google kernel source
-        shell: bash
+      # ------------------------------------------------------------
+      # 5. Sync all source code (this may take ~10-20 minutes)
+      # ------------------------------------------------------------
+      - name: Sync source
         run: |
-          set -eux
+          cd kernel_workspace
+          repo sync -j$(nproc) --force-sync
 
-          cd kernel-tree
-
-          rm -rf common
-
-          echo "Google generic common kernel removed."
-
-      # ============================================================
-      # 7. Checkout Volla Quintus kernel
-      #
-      # Required location:
-      #
-      #     kernel-6.6/
-      # ============================================================
-      - name: Checkout Volla Quintus kernel
-        shell: bash
+      # ------------------------------------------------------------
+      # 6. Patch the kernel defconfig with DroidSpace options
+      # ------------------------------------------------------------
+      - name: Add DroidSpace kernel configs
         run: |
-          set -eux
+          cd kernel_workspace
 
-          cd kernel-tree
+          # Find the defconfig for your device (assumes it contains "volla")
+          DEFCONFIG_PATH=$(find . -path "*/arch/arm64/configs/*defconfig" -name "*volla*" | head -n1)
 
-          git clone \
-            --depth=1 \
-            --branch "$KERNEL_BRANCH" \
-            "$KERNEL_REPO" \
-            kernel-6.6
-
-          echo
-          echo "===== Volla Kernel ====="
-
-          test -f kernel-6.6/Makefile
-          test -f kernel-6.6/build.config.common
-          test -f kernel-6.6/build.config.aarch64
-
-          git -C kernel-6.6 log -1 --oneline
-
-      # ============================================================
-      # 8. Checkout Quintus device modules
-      #
-      # Required location:
-      #
-      #     kernel_device_modules-6.6/
-      # ============================================================
-      - name: Checkout Volla Quintus device modules
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          git clone \
-            --depth=1 \
-            --branch "$KERNEL_BRANCH" \
-            "$DEVICE_MODULES_REPO" \
-            kernel_device_modules-6.6
-
-          echo
-          echo "===== Device Modules ====="
-
-          test -f kernel_device_modules-6.6/build.sh
-          test -f kernel_device_modules-6.6/build.config.mtk_kernel_device_modules
-
-          git -C kernel_device_modules-6.6 log -1 --oneline
-
-      # ============================================================
-      # 9. Checkout Volla MediaTek vendor kernel modules
-      #
-      # Required location:
-      #
-      #     vendor/mediatek/kernel_modules/
-      # ============================================================
-      - name: Checkout Volla MediaTek vendor modules
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          mkdir -p vendor/mediatek
-
-          git clone \
-            --depth=1 \
-            --branch "$KERNEL_BRANCH" \
-            "$VENDOR_MODULES_REPO" \
-            vendor/mediatek/kernel_modules
-
-          echo
-          echo "===== Vendor Modules ====="
-
-          test -d vendor/mediatek/kernel_modules
-
-          git -C vendor/mediatek/kernel_modules log -1 --oneline
-
-      # ============================================================
-      # 10. Checkout Volla MGK Bazel rules
-      #
-      # Volla's Quintus BUILD files use:
-      #
-      #     //build/bazel_mgk_rules:mgk.bzl
-      #
-      # ============================================================
-      - name: Checkout Volla MGK Bazel rules
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          rm -rf build/bazel_mgk_rules
-
-          git clone \
-            --depth=1 \
-            --branch "$MGK_RULES_BRANCH" \
-            "$MGK_RULES_REPO" \
-            build/bazel_mgk_rules
-
-          echo
-          echo "===== MGK RULES ====="
-
-          test -f build/bazel_mgk_rules/BUILD.bazel
-          test -f build/bazel_mgk_rules/mgk.bzl
-
-          git -C build/bazel_mgk_rules log -1 --oneline
-
-      # ============================================================
-      # 11. Verify final source layout
-      # ============================================================
-      - name: Verify complete Volla source tree
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          echo
-          echo "========================================"
-          echo "FINAL SOURCE TREE"
-          echo "========================================"
-
-          echo
-          echo "[build/kernel]"
-          test -d build/kernel
-          test -f build/kernel/kleaf/bazel.sh
-
-          echo
-          echo "[build/bazel_common_rules]"
-          test -d build/bazel_common_rules
-
-          echo
-          echo "[build/bazel_mgk_rules]"
-          test -f build/bazel_mgk_rules/mgk.bzl
-
-          echo
-          echo "[kernel-6.6]"
-          test -d kernel-6.6
-          test -f kernel-6.6/Makefile
-
-          echo
-          echo "[kernel_device_modules-6.6]"
-          test -d kernel_device_modules-6.6
-          test -f kernel_device_modules-6.6/build.sh
-
-          echo
-          echo "[vendor modules]"
-          test -d vendor/mediatek/kernel_modules
-
-          echo
-          echo "[tools/bazel]"
-          test -e tools/bazel
-
-          echo
-          echo "[WORKSPACE]"
-          test -f WORKSPACE
-
-          echo
-          echo "[MODULE.bazel]"
-          test -f MODULE.bazel
-
-          echo
-          echo "========================================"
-          echo "TREE OK"
-          echo "========================================"
-
-      # ============================================================
-      # 12. Show exact Volla configuration
-      # ============================================================
-      - name: Inspect Volla build configuration
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          echo
-          echo "===== build.config.mtk_kernel_device_modules ====="
-
-          cat \
-            kernel_device_modules-6.6/build.config.mtk_kernel_device_modules
-
-          echo
-          echo "===== build.config.mtk.aarch64.mgk ====="
-
-          cat \
-            kernel_device_modules-6.6/build.config.mtk.aarch64.mgk
-
-          echo
-          echo "===== _setup_env.sh ====="
-
-          sed -n '1,120p' \
-            kernel_device_modules-6.6/kernel/kleaf/_setup_env.sh
-
-      # ============================================================
-      # 13. Patch SELinux permissive
-      #
-      # This is YOUR requested modification.
-      # ============================================================
-      - name: Patch SELinux to permissive
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree/kernel-6.6
-
-          if grep -q \
-            'unsigned int selinux_enforcing = 1;' \
-            security/selinux/hooks.c
-          then
-            sed -i \
-              's/unsigned int selinux_enforcing = 1;/unsigned int selinux_enforcing = 0;/' \
-              security/selinux/hooks.c
+          # Fallback: use any defconfig if none found
+          if [ -z "$DEFCONFIG_PATH" ]; then
+            echo "No volla defconfig found, using the first defconfig found."
+            DEFCONFIG_PATH=$(find . -path "*/arch/arm64/configs/*defconfig" | head -n1)
           fi
 
-          if grep -q \
-            'int selinux_enforcing = 1;' \
-            security/selinux/hooks.c
-          then
-            sed -i \
-              's/int selinux_enforcing = 1;/int selinux_enforcing = 0;/' \
-              security/selinux/hooks.c
-          fi
-
-          echo
-          echo "===== SELINUX ====="
-
-          grep -n \
-            "selinux_enforcing" \
-            security/selinux/hooks.c \
-            || true
-
-      # ============================================================
-      # 14. Enable unprivileged user namespaces
-      # ============================================================
-      - name: Enable unprivileged user namespaces
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree/kernel-6.6
-
-          if [ -f kernel/sysctl.c ]; then
-
-            sed -i \
-              's/int sysctl_unprivileged_userns_clone = 0;/int sysctl_unprivileged_userns_clone = 1;/' \
-              kernel/sysctl.c || true
-
-          fi
-
-      # ============================================================
-      # 15. Build Volla Quintus kernel
-      #
-      # IMPORTANT:
-      #
-      # Do NOT use:
-      #
-      #     ./tools/bazel run //common:kernel_aarch64_dist
-      #
-      # Volla's build.sh creates the correct:
-      #
-      #     mgk_64_k66
-      #
-      # target.
-      # ============================================================
-      - name: Build Volla Quintus kernel
-        shell: bash
-        working-directory: kernel-tree
-        env:
-          MODE: userdebug
-          DEBUG: "1"
-          SANDBOX: "0"
-        run: |
-          set -eux
-
-          chmod +x \
-            kernel_device_modules-6.6/build.sh
-
-          ./kernel_device_modules-6.6/build.sh
-
-      # ============================================================
-      # 16. Display build output
-      # ============================================================
-      - name: Inspect build output
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          echo
-          echo "========================================"
-          echo "BUILD OUTPUT"
-          echo "========================================"
-
-          find out \
-            -maxdepth 6 \
-            -type f \
-            \( \
-              -name "Image" \
-              -o -name "Image.gz" \
-              -o -name "*.dtb" \
-              -o -name "*.ko" \
-              -o -name "vmlinux" \
-            \) \
-            -print \
-            2>/dev/null \
-            | head -300 || true
-
-      # ============================================================
-      # 17. Collect kernel artifacts
-      # ============================================================
-      - name: Collect kernel artifacts
-        shell: bash
-        run: |
-          set -eux
-
-          cd kernel-tree
-
-          rm -rf ../kernel-artifacts
-
-          mkdir -p ../kernel-artifacts
-          mkdir -p ../kernel-artifacts/dtb
-          mkdir -p ../kernel-artifacts/modules
-
-          # --------------------------------------------------------
-          # Kernel Image
-          # --------------------------------------------------------
-
-          IMG=$(find out \
-            -type f \
-            \( -name "Image.gz" -o -name "Image" \) \
-            -print \
-            | head -n1)
-
-          if [ -z "$IMG" ]; then
-            echo "::error::No Image/Image.gz found!"
+          if [ -z "$DEFCONFIG_PATH" ]; then
+            echo "ERROR: Could not find any defconfig!"
             exit 1
           fi
 
-          echo "Kernel image:"
-          echo "$IMG"
+          echo "Patching defconfig at: $DEFCONFIG_PATH"
 
-          cp "$IMG" ../kernel-artifacts/
+          # Append all required DroidSpace options
+          cat >> "$DEFCONFIG_PATH" << 'EOF'
+          # DroidSpace required configs
+          CONFIG_SYSCTL=y
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_NAMESPACES=y
+          CONFIG_PID_NS=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_SECCOMP=y
+          CONFIG_SECCOMP_FILTER=y
+          CONFIG_CGROUPS=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_MEMCG=y
+          CONFIG_CGROUP_SCHED=y
+          CONFIG_FAIR_GROUP_SCHED=y
+          CONFIG_CGROUP_FREEZER=y
+          CONFIG_CGROUP_NET_PRIO=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_FW_LOADER=y
+          CONFIG_FW_LOADER_USER_HELPER=y
+          CONFIG_FW_LOADER_COMPRESS=y
+          CONFIG_NET_NS=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_NETFILTER=y
+          CONFIG_BRIDGE_NETFILTER=y
+          CONFIG_NETFILTER_ADVANCED=y
+          CONFIG_NF_CONNTRACK=y
+          CONFIG_IP_NF_IPTABLES=y
+          CONFIG_IP_NF_FILTER=y
+          CONFIG_NF_NAT=y
+          CONFIG_NF_TABLES=y
+          CONFIG_IP_NF_TARGET_MASQUERADE=y
+          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
+          CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NF_CONNTRACK_NETLINK=y
+          CONFIG_NF_NAT_REDIRECT=y
+          CONFIG_IP_ADVANCED_ROUTER=y
+          CONFIG_IP_MULTIPLE_TABLES=y
+          EOF
 
-          # --------------------------------------------------------
-          # DTBs
-          # --------------------------------------------------------
+          # Disable Android's paranoid network (required for internet in DroidSpace)
+          if grep -q "CONFIG_ANDROID_PARANOID_NETWORK=y" "$DEFCONFIG_PATH"; then
+            sed -i 's/CONFIG_ANDROID_PARANOID_NETWORK=y/# CONFIG_ANDROID_PARANOID_NETWORK is not set/' "$DEFCONFIG_PATH"
+            echo "Disabled CONFIG_ANDROID_PARANOID_NETWORK."
+          fi
 
-          find out \
-            -type f \
-            -name "*.dtb" \
-            -exec cp {} ../kernel-artifacts/dtb/ \; \
-            || true
+          echo "Defconfig patched successfully."
 
-          # --------------------------------------------------------
-          # Modules
-          # --------------------------------------------------------
-
-          find out \
-            -type f \
-            -name "*.ko" \
-            -exec cp --parents {} ../kernel-artifacts/modules/ \; \
-            || true
-
-          echo
-          echo "===== ARTIFACTS ====="
-
-          find ../kernel-artifacts \
-            -type f \
-            -print
-
-      # ============================================================
-      # 18. Upload raw kernel build
-      # ============================================================
-      - name: Upload raw kernel artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Volla-Quintus-16-Kernel-Raw
-          path: kernel-artifacts
-          if-no-files-found: error
-          retention-days: 30
-
-      # ============================================================
-      # 19. Clone AnyKernel3
-      # ============================================================
-      - name: Clone AnyKernel3
-        shell: bash
+      # ------------------------------------------------------------
+      # 7. Build the kernel using Volla's build script
+      # ------------------------------------------------------------
+      - name: Build kernel
         run: |
-          set -eux
+          cd kernel_workspace
 
-          rm -rf anykernel
-
-          git clone \
-            --depth=1 \
-            https://github.com/osm0sis/AnyKernel3.git \
-            anykernel
-
-      # ============================================================
-      # 20. Create AnyKernel package
-      #
-      # IMPORTANT:
-      #
-      # We are NOT pretending that the default AnyKernel3
-      # configuration is confirmed for Quintus.
-      #
-      # The kernel image is packaged, but the installer must be
-      # configured with the real Quintus boot partition before
-      # flashing.
-      # ============================================================
-      - name: Prepare AnyKernel3
-        shell: bash
-        run: |
-          set -eux
-
-          cd anykernel
-
-          rm -rf ramdisk
-          rm -rf patch
-
-          find tools \
-            -type f \
-            \( -name "*.dtb" -o -name "*.img" \) \
-            -delete \
-            2>/dev/null \
-            || true
-
-          IMG=$(find ../kernel-artifacts \
-            -type f \
-            \( -name "Image.gz" -o -name "Image" \) \
-            -print \
-            | head -n1)
-
-          if [ -z "$IMG" ]; then
-            echo "::error::Kernel image missing"
+          # The build script is usually located at kernel_device_modules-6.6/build.sh
+          if [ -f "kernel_device_modules-6.6/build.sh" ]; then
+            ./kernel_device_modules-6.6/build.sh
+          elif [ -f "build.sh" ]; then
+            ./build.sh
+          else
+            echo "ERROR: No build script found!"
             exit 1
           fi
 
-          cp "$IMG" Image.gz
-
-          cat > README_VOLLA_QUINTUS.txt <<'EOF'
-Volla Phone Quintus / Algiz
-Android 16 kernel
-
-Kernel:
-HelloVolla/android_kernel_volla_mt6877
-
-Branch:
-volla-16.0
-
-Build:
-Kleaf / MGK / Linux 6.6
-
-IMPORTANT:
-This AnyKernel3 package is NOT yet a verified
-Volla Quintus flash installer.
-
-Before flashing, verify:
-
-1. boot partition
-2. vendor_boot partition
-3. init_boot partition
-4. DTBO handling
-5. A/B slot handling
-6. kernel compression format
-7. device name
-8. AnyKernel3 block settings
-
-The raw kernel artifact is the authoritative build output.
-EOF
-
-      # ============================================================
-      # 21. Package AnyKernel3
-      # ============================================================
-      - name: Create AnyKernel3 ZIP
-        shell: bash
-        run: |
-          set -eux
-
-          cd anykernel
-
-          zip -r9 \
-            ../Volla-Quintus-16-Kernel-AnyKernel3.zip \
-            . \
-            -x ".git/*"
-
-      # ============================================================
-      # 22. Upload AnyKernel3 ZIP
-      # ============================================================
-      - name: Upload AnyKernel3 ZIP
+      # ------------------------------------------------------------
+      # 8. Upload the resulting build artifacts
+      # ------------------------------------------------------------
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Volla-Quintus-16-Kernel-AnyKernel3
-          path: Volla-Quintus-16-Kernel-AnyKernel3.zip
+          name: kernel-build-out
+          path: kernel_workspace/out/
           if-no-files-found: error
-          retention-days: 30
-
-      # ============================================================
-      # 23. Print final summary
-      # ============================================================
-      - name: Build summary
-        shell: bash
-        run: |
-          echo "=============================================="
-          echo " Volla Quintus kernel build completed"
-          echo "=============================================="
-          echo
-          echo "Kernel source:"
-          echo "$KERNEL_REPO"
-          echo
-          echo "Branch:"
-          echo "$KERNEL_BRANCH"
-          echo
-          echo "Kernel:"
-          echo "Linux 6.6 / MT6877"
-          echo
-          echo "Artifacts:"
-          echo "- Volla-Quintus-16-Kernel-Raw"
-          echo "- Volla-Quintus-16-Kernel-AnyKernel3"
-          echo
-          echo "WARNING:"
-          echo "Do not flash the AnyKernel ZIP until its"
-          echo "Quintus partition configuration is verified."
-
