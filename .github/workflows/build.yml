@@ -1,7 +1,7 @@
 name: Build Volla Kernel with DroidSpace Support
 
 on:
-  workflow_dispatch:        # manual trigger only
+  workflow_dispatch:
 
 jobs:
   build:
@@ -9,9 +9,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Install system dependencies
-      # ------------------------------------------------------------
       - name: Install packages
         run: |
           sudo apt update
@@ -22,26 +19,17 @@ jobs:
             zlib1g-dev libyaml-dev lz4 zstd device-tree-compiler \
             kmod cpio rsync
 
-      # ------------------------------------------------------------
-      # 2. Install latest repo tool (avoids the "launcher not writable" warning)
-      # ------------------------------------------------------------
-      - name: Install repo
+      - name: Install latest repo
         run: |
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > /tmp/repo
           chmod +x /tmp/repo
           sudo mv /tmp/repo /usr/local/bin/repo
 
-      # ------------------------------------------------------------
-      # 3. Configure git (required for repo)
-      # ------------------------------------------------------------
       - name: Configure git
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      # ------------------------------------------------------------
-      # 4. Initialize the workspace with Google's manifest
-      # ------------------------------------------------------------
       - name: Initialize repo workspace
         run: |
           mkdir kernel_workspace
@@ -49,34 +37,22 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest.git \
                     -b common-android15-6.6
 
-      # ------------------------------------------------------------
-      # 5. Add Volla's local manifest
-      # ------------------------------------------------------------
       - name: Add Volla local manifest
         run: |
           cd kernel_workspace
           git clone https://github.com/HelloVolla/android_kernel_manifest.git \
                     -b volla-16.0-algiz .repo/local_manifests
 
-      # ------------------------------------------------------------
-      # 6. Sync all source code
-      # ------------------------------------------------------------
-      - name: Sync source
+      - name: Sync sources
         run: |
           cd kernel_workspace
           repo sync -j$(nproc) --force-sync --no-clone-bundle
 
-      # ------------------------------------------------------------
-      # 7. Patch defconfig with DroidSpace options (avoid duplicates)
-      # ------------------------------------------------------------
-      - name: Add DroidSpace kernel configs
+      - name: Patch defconfig with DroidSpace options
         run: |
           cd kernel_workspace
-
-          # Find defconfig
           DEFCONFIG_PATH=$(find . -path "*/arch/arm64/configs/*defconfig" -name "*volla*" | head -n1)
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "No volla defconfig found, using the first defconfig found."
             DEFCONFIG_PATH=$(find . -path "*/arch/arm64/configs/*defconfig" | head -n1)
           fi
           if [ -z "$DEFCONFIG_PATH" ]; then
@@ -85,12 +61,10 @@ jobs:
           fi
           echo "Using defconfig: $DEFCONFIG_PATH"
 
-          # Function to add option only if missing
           add_config() {
             grep -qxF "$1" "$DEFCONFIG_PATH" || echo "$1" >> "$DEFCONFIG_PATH"
           }
 
-          # Add all required DroidSpace options
           add_config "CONFIG_SYSCTL=y"
           add_config "CONFIG_SYSVIPC=y"
           add_config "CONFIG_POSIX_MQUEUE=y"
@@ -135,16 +109,47 @@ jobs:
           add_config "CONFIG_IP_ADVANCED_ROUTER=y"
           add_config "CONFIG_IP_MULTIPLE_TABLES=y"
 
-          # Disable paranoid network if present
           if grep -q "CONFIG_ANDROID_PARANOID_NETWORK=y" "$DEFCONFIG_PATH"; then
             sed -i 's/CONFIG_ANDROID_PARANOID_NETWORK=y/# CONFIG_ANDROID_PARANOID_NETWORK is not set/' "$DEFCONFIG_PATH"
             echo "Disabled CONFIG_ANDROID_PARANOID_NETWORK"
           fi
 
-          echo "Defconfig patched successfully."
+          echo "Defconfig patched."
 
       # ------------------------------------------------------------
-      # 8. Build the kernel using Volla's script
+      # NEW: Fix the Bazel macro to accept dtb_files
+      # ------------------------------------------------------------
+      - name: Fix mgk.bzl to accept dtb_files argument
+        run: |
+          cd kernel_workspace
+          MGK_FILE="build/bazel_mgk_rules/mgk.bzl"
+          if [ -f "$MGK_FILE" ]; then
+            # Add 'dtb_files = None' to the define_mgk parameters
+            sed -i '/^def define_mgk(/ s/):/), dtb_files = None):/' "$MGK_FILE"
+            # Also ensure the argument is used (or ignored) – we just add a no-op line
+            # Insert a line to assign dtb_files to a variable to avoid unused warning
+            sed -i '/^def define_mgk(/a \  _ignore = dtb_files  # to avoid unused variable' "$MGK_FILE"
+            echo "Patched $MGK_FILE"
+          else
+            echo "WARNING: $MGK_FILE not found – skipping"
+          fi
+
+      # ------------------------------------------------------------
+      # NEW: Fix build.sh target (remove .user suffix)
+      # ------------------------------------------------------------
+      - name: Fix build.sh target
+        run: |
+          cd kernel_workspace
+          if [ -f "kernel_device_modules-6.6/build.sh" ]; then
+            # Replace .user with nothing in the bazel target
+            sed -i 's/\.user//g' kernel_device_modules-6.6/build.sh
+            echo "Removed .user suffix from build target."
+          else
+            echo "WARNING: build.sh not found – skipping"
+          fi
+
+      # ------------------------------------------------------------
+      # Now run the build script (should work)
       # ------------------------------------------------------------
       - name: Build kernel
         run: |
@@ -158,10 +163,7 @@ jobs:
             exit 1
           fi
 
-      # ------------------------------------------------------------
-      # 9. Upload artifacts
-      # ------------------------------------------------------------
-      - name: Upload kernel artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-build-out
