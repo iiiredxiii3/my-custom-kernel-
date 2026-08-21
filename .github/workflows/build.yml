@@ -1,4 +1,4 @@
-name: Build Volla 16 Kernel (Permissive + Droidspaces + GKI)
+name: Build Volla 16 Kernel (Flashable Zip)
 
 on:
   workflow_dispatch:
@@ -7,107 +7,96 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout Kernel Source
-      uses: actions/checkout@v4
-      with:
-        repository: HelloVolla/android_kernel_volla_mt6877
-        ref: volla-16.0
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: IIIMGHIII/android_kernel_volla_mt6877
+          ref: volla-16.0
+          path: common
 
-    - name: Install Dependencies & System Clang
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl clang lld llvm gcc-aarch64-linux-gnu
+      - name: Install Dependencies & System Clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl clang lld llvm gcc-aarch64-linux-gnu python3
 
-    - name: Patch SELinux to Permissive
-      run: |
-        # Patch 1: Force SELinux variable to 0 (Permissive)
-        sed -i 's/unsigned int selinux_enforcing = 1;/unsigned int selinux_enforcing = 0;/' security/selinux/hooks.c || true
-        sed -i 's/int selinux_enforcing = 1;/int selinux_enforcing = 0;/' security/selinux/hooks.c || true
-        
-        # Patch 2: Ignore userspace requests to set Enforcing mode
-        sed -i 's/return -EINVAL;/return 0; \/\/ FORCED PERMISSIVE/' security/selinux/selinuxfs.c || true
+      - name: Sanity-check this repo is actually Bazel-buildable standalone
+        run: |
+          cd common
+          if [ ! -f "WORKSPACE" ] && [ ! -f "MODULE.bazel" ]; then
+            echo "::error::No WORKSPACE or MODULE.bazel found. This repo alone is NOT a complete"
+            echo "::error::Bazel workspace -- it needs to be checked out as part of a larger multi-repo"
+            echo "::error::tree (via Google's 'repo' tool + a manifest) that also provides the Kleaf"
+            echo "::error::build framework (tools/bazel's real implementation), prebuilt toolchains,"
+            echo "::error::and -- for full hardware support -- the device_modules repo as a sibling."
+            echo "::error::Get the actual repo manifest from HelloVolla/the Volla community before this"
+            echo "::error::step will do anything meaningful. See previous chat discussion for details."
+            exit 1
+          fi
 
-    - name: Patch GKI Namespace Restrictions
-      run: |
-        # GKI blocks unprivileged user namespaces by default. We must force it to 1.
-        if [ -f "kernel/sysctl.c" ]; then
-          sed -i 's/int sysctl_unprivileged_userns_clone = 0;/int sysctl_unprivileged_userns_clone = 1;/' kernel/sysctl.c || true
-        fi
-        
-        # Remove the Android-specific check that blocks unprivileged namespaces in nsproxy
-        if [ -f "kernel/cred.c" ]; then
-          sed -i '/if (capable(CAP_SYS_ADMIN) || capable(CAP_SETUID))/d' kernel/cred.c || true
-        fi
+      - name: Patch SELinux to Permissive
+        run: |
+          cd common
+          test -f security/selinux/hooks.c || { echo "::error::hooks.c not found at expected path"; exit 1; }
+          sed -i 's/unsigned int selinux_enforcing = 1;/unsigned int selinux_enforcing = 0;/' security/selinux/hooks.c
+          sed -i 's/int selinux_enforcing = 1;/int selinux_enforcing = 0;/' security/selinux/hooks.c
 
-        # Allow CLONE_NEWNS and CLONE_NEWPID for unprivileged users
-        if [ -f "kernel/fork.c" ]; then
-          sed -i 's/if (!capable(CAP_SYS_ADMIN) \&\& flags)/if (0 \&\& flags)/' kernel/fork.c || true
-        fi
+      - name: Enable unprivileged user namespaces (sysctl-only, safe)
+        run: |
+          cd common
+          if [ -f "kernel/sysctl.c" ]; then
+            sed -i 's/int sysctl_unprivileged_userns_clone = 0;/int sysctl_unprivileged_userns_clone = 1;/' kernel/sysctl.c || true
+          fi
 
-    - name: Configure Kernel & Enable ALL Droidspaces Features
-      run: |
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_COMPAT=aarch64-linux-gnu-
-        export CC=clang
-        export LLVM=1
-        export LLVM_IAS=1
-        
-        # Load default config (volla-16.0 might use a slightly different name, fallback to defconfig)
-        make O=out mt6877_volla_defconfig || make O=out vendor/volla_quintus_defconfig || make O=out defconfig
-        
-        # --- IPC ---
-        ./scripts/config --file out/.config -e SYSVIPC
-        ./scripts/config --file out/.config -e POSIX_MQUEUE
-        
-        # --- Namespaces ---
-        ./scripts/config --file out/.config -e IPC_NS
-        ./scripts/config --file out/.config -e PID_NS
-        
-        # --- HW Access Support ---
-        ./scripts/config --file out/.config -e DEVTMPFS
-        ./scripts/config --file out/.config -e DEVTMPFS_MOUNT
-        ./scripts/config --file out/.config -e DEVPTS_FS
-        
-        # --- Networking (Enhanced NAT support) ---
-        ./scripts/config --file out/.config -e NETFILTER_XT_MATCH_ADDRTYPE
-        
-        # --- Fix for docker unsafe procfs error ---
-        ./scripts/config --file out/.config -e USER_NS
-        
-        # --- UFW support ---
-        ./scripts/config --file out/.config -e NETFILTER_XT_TARGET_REJECT
-        ./scripts/config --file out/.config -e NETFILTER_XT_TARGET_LOG
-        ./scripts/config --file out/.config -e NETFILTER_XT_MATCH_RECENT
-        
-        # --- Fail2ban support ---
-        ./scripts/config --file out/.config -e IP_SET
-        ./scripts/config --file out/.config -e IP_SET_HASH_IP
-        ./scripts/config --file out/.config -e IP_SET_HASH_NET
-        ./scripts/config --file out/.config -e NETFILTER_XT_SET
-        
-        # --- Enable xattr, posix acl support on tmpfs (NixOS support) ---
-        ./scripts/config --file out/.config -e TMPFS_POSIX_ACL
-        ./scripts/config --file out/.config -e TMPFS_XATTR
-        
-        # Resolve dependencies automatically
-        make O=out olddefconfig
+      - name: Build Kernel (Bazel / Kleaf)
+        run: |
+          cd common
+          ./tools/bazel run //common:kernel_aarch64_dist -- --dist_dir=dist
 
-    - name: Build Kernel
-      run: |
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_COMPAT=aarch64-linux-gnu-
-        export CC=clang
-        export LLVM=1
-        export LLVM_IAS=1
-        
-        make O=out -j$(nproc) Image.gz
+      - name: Locate built Image.gz
+        id: locate_image
+        run: |
+          IMG=$(find common/dist -iname "Image.gz" | head -n1)
+          if [ -z "$IMG" ]; then
+            echo "::error::No Image.gz found in dist output -- build did not produce a kernel image."
+            find common/dist -maxdepth 2 || true
+            exit 1
+          fi
+          echo "img=$IMG" >> "$GITHUB_OUTPUT"
 
-    - name: Upload Kernel Image
-      uses: actions/upload-artifact@v4
-      with:
-        name: Volla-16-Permissive-Droidspaces-Kernel
-        path: out/arch/arm64/boot/Image.gz
+      - name: Package as AnyKernel3 flashable zip
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 anykernel
+          cd anykernel
+
+          # Strip the sample config/ramdisk patches that come with the template --
+          # keep only the installer scripts and META-INF, since we don't know this
+          # device's exact partition/ramdisk layout. You MUST edit anykernel.sh
+          # below (or replace it with a known-good one for the Quintus/algiz) before
+          # this zip is safe to flash.
+          rm -rf ramdisk patch tools/*.dtb 2>/dev/null || true
+
+          cp "../${{ steps.locate_image.outputs.img }}" ./Image.gz
+
+          cat <<'EOF' >> anykernel.sh
+          # --- REVIEW THIS BEFORE FLASHING ---
+          # device.name1=... , block=... , and other settings above in this file
+          # are AnyKernel3 defaults and are NOT verified for the Volla Algiz/Quintus.
+          # Replace anykernel.sh with a known-working one for this device if you can
+          # find one, or manually fill in the correct `block=` (boot partition path)
+          # and `device.name*=` (your device's build.product/model string) values
+          # in the properties block near the top of this file.
+          EOF
+
+          zip -r9 ../Volla-16-Permissive-Droidspaces-Kernel-AnyKernel3.zip . -x ".git/*"
+
+      - name: Upload Flashable Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Volla-16-Permissive-Droidspaces-Kernel-AnyKernel3
+          path: Volla-16-Permissive-Droidspaces-Kernel-AnyKernel3.zip
+
+      - name: Also upload raw Image.gz
+        uses: actions/upload-artifact@v4
+        with:
+          name: Volla-16-Permissive-Droidspaces-Kernel-raw
+          path: common/${{ steps.locate_image.outputs.img }}
