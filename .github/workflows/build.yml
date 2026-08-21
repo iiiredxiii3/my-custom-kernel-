@@ -113,44 +113,40 @@ jobs:
             sed -i 's/CONFIG_ANDROID_PARANOID_NETWORK=y/# CONFIG_ANDROID_PARANOID_NETWORK is not set/' "$DEFCONFIG_PATH"
             echo "Disabled CONFIG_ANDROID_PARANOID_NETWORK"
           fi
-
           echo "Defconfig patched."
 
-      # ------------------------------------------------------------
-      # NEW: Fix the Bazel macro to accept dtb_files
-      # ------------------------------------------------------------
-      - name: Fix mgk.bzl to accept dtb_files argument
+      # -----------------------------------------------------------------
+      # FIX 1: Remove the dtb_files argument from BUILD.bazel
+      # -----------------------------------------------------------------
+      - name: Fix BUILD.bazel to remove dtb_files
         run: |
           cd kernel_workspace
-          MGK_FILE="build/bazel_mgk_rules/mgk.bzl"
-          if [ -f "$MGK_FILE" ]; then
-            # Add 'dtb_files = None' to the define_mgk parameters
-            sed -i '/^def define_mgk(/ s/):/), dtb_files = None):/' "$MGK_FILE"
-            # Also ensure the argument is used (or ignored) – we just add a no-op line
-            # Insert a line to assign dtb_files to a variable to avoid unused warning
-            sed -i '/^def define_mgk(/a \  _ignore = dtb_files  # to avoid unused variable' "$MGK_FILE"
-            echo "Patched $MGK_FILE"
+          BUILD_FILE="kernel_device_modules-6.6/BUILD.bazel"
+          if [ -f "$BUILD_FILE" ]; then
+            # Comment out the line that sets dtb_files
+            sed -i '/dtb_files =/ s/^/# /' "$BUILD_FILE"
+            echo "Commented out dtb_files in $BUILD_FILE"
           else
-            echo "WARNING: $MGK_FILE not found – skipping"
+            echo "WARNING: $BUILD_FILE not found"
           fi
 
-      # ------------------------------------------------------------
-      # NEW: Fix build.sh target (remove .user suffix)
-      # ------------------------------------------------------------
-      - name: Fix build.sh target
+      # -----------------------------------------------------------------
+      # FIX 2: Remove .user suffix from all targets in build.sh
+      # -----------------------------------------------------------------
+      - name: Fix build.sh target names (remove .user)
         run: |
           cd kernel_workspace
           if [ -f "kernel_device_modules-6.6/build.sh" ]; then
-            # Replace .user with nothing in the bazel target
+            # Use sed to replace .user with nothing globally
             sed -i 's/\.user//g' kernel_device_modules-6.6/build.sh
-            echo "Removed .user suffix from build target."
+            echo "Removed .user from build.sh"
           else
-            echo "WARNING: build.sh not found – skipping"
+            echo "WARNING: build.sh not found"
           fi
 
-      # ------------------------------------------------------------
-      # Now run the build script (should work)
-      # ------------------------------------------------------------
+      # -----------------------------------------------------------------
+      # Build
+      # -----------------------------------------------------------------
       - name: Build kernel
         run: |
           cd kernel_workspace
