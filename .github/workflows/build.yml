@@ -1,32 +1,38 @@
 name: Build Volla Kernel with DroidSpace Support
 
 on:
-  workflow_dispatch:        # manual start from the Actions tab
-  # push:                   # uncomment to build on every push
-  # schedule:               # or schedule a weekly build
-  #   - cron: '0 0 * * 0'
+  workflow_dispatch:        # manual trigger only
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360    # generous timeout (6 hours)
+    timeout-minutes: 360
 
     steps:
       # ------------------------------------------------------------
-      # 1. Install all required packages
+      # 1. Install system dependencies
       # ------------------------------------------------------------
-      - name: Install dependencies
+      - name: Install packages
         run: |
           sudo apt update
           sudo apt install -y \
-            git curl python3 python-is-python3 repo \
+            git curl python3 python-is-python3 \
             build-essential bc bison flex patch pkg-config \
             libssl-dev libelf-dev pahole libncurses-dev \
             zlib1g-dev libyaml-dev lz4 zstd device-tree-compiler \
             kmod cpio rsync
 
       # ------------------------------------------------------------
-      # 2. Set up Git user (needed by repo)
+      # 2. Install latest repo tool (avoids the "launcher not writable" warning)
+      # ------------------------------------------------------------
+      - name: Install repo
+        run: |
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > /tmp/repo
+          chmod +x /tmp/repo
+          sudo mv /tmp/repo /usr/local/bin/repo
+
+      # ------------------------------------------------------------
+      # 3. Configure git (required for repo)
       # ------------------------------------------------------------
       - name: Configure git
         run: |
@@ -34,9 +40,9 @@ jobs:
           git config --global user.email "actions@github.com"
 
       # ------------------------------------------------------------
-      # 3. Initialize the kernel workspace with Google's manifest
+      # 4. Initialize the workspace with Google's manifest
       # ------------------------------------------------------------
-      - name: Initialize repo
+      - name: Initialize repo workspace
         run: |
           mkdir kernel_workspace
           cd kernel_workspace
@@ -44,7 +50,7 @@ jobs:
                     -b common-android15-6.6
 
       # ------------------------------------------------------------
-      # 4. Add Volla's local manifest (device‑specific repos)
+      # 5. Add Volla's local manifest
       # ------------------------------------------------------------
       - name: Add Volla local manifest
         run: |
@@ -53,100 +59,96 @@ jobs:
                     -b volla-16.0-algiz .repo/local_manifests
 
       # ------------------------------------------------------------
-      # 5. Sync all source code (this may take ~10-20 minutes)
+      # 6. Sync all source code
       # ------------------------------------------------------------
       - name: Sync source
         run: |
           cd kernel_workspace
-          repo sync -j$(nproc) --force-sync
+          repo sync -j$(nproc) --force-sync --no-clone-bundle
 
       # ------------------------------------------------------------
-      # 6. Patch the kernel defconfig with DroidSpace options
+      # 7. Patch defconfig with DroidSpace options (avoid duplicates)
       # ------------------------------------------------------------
       - name: Add DroidSpace kernel configs
         run: |
           cd kernel_workspace
 
-          # Find the defconfig for your device (assumes it contains "volla")
+          # Find defconfig
           DEFCONFIG_PATH=$(find . -path "*/arch/arm64/configs/*defconfig" -name "*volla*" | head -n1)
-
-          # Fallback: use any defconfig if none found
           if [ -z "$DEFCONFIG_PATH" ]; then
             echo "No volla defconfig found, using the first defconfig found."
             DEFCONFIG_PATH=$(find . -path "*/arch/arm64/configs/*defconfig" | head -n1)
           fi
-
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "ERROR: Could not find any defconfig!"
+            echo "ERROR: No defconfig found!"
             exit 1
           fi
+          echo "Using defconfig: $DEFCONFIG_PATH"
 
-          echo "Patching defconfig at: $DEFCONFIG_PATH"
+          # Function to add option only if missing
+          add_config() {
+            grep -qxF "$1" "$DEFCONFIG_PATH" || echo "$1" >> "$DEFCONFIG_PATH"
+          }
 
-          # Append all required DroidSpace options
-          cat >> "$DEFCONFIG_PATH" << 'EOF'
-          # DroidSpace required configs
-          CONFIG_SYSCTL=y
-          CONFIG_SYSVIPC=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_NAMESPACES=y
-          CONFIG_PID_NS=y
-          CONFIG_UTS_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_SECCOMP=y
-          CONFIG_SECCOMP_FILTER=y
-          CONFIG_CGROUPS=y
-          CONFIG_CGROUP_DEVICE=y
-          CONFIG_CGROUP_PIDS=y
-          CONFIG_MEMCG=y
-          CONFIG_CGROUP_SCHED=y
-          CONFIG_FAIR_GROUP_SCHED=y
-          CONFIG_CGROUP_FREEZER=y
-          CONFIG_CGROUP_NET_PRIO=y
-          CONFIG_DEVTMPFS=y
-          CONFIG_OVERLAY_FS=y
-          CONFIG_TMPFS_POSIX_ACL=y
-          CONFIG_TMPFS_XATTR=y
-          CONFIG_FW_LOADER=y
-          CONFIG_FW_LOADER_USER_HELPER=y
-          CONFIG_FW_LOADER_COMPRESS=y
-          CONFIG_NET_NS=y
-          CONFIG_VETH=y
-          CONFIG_BRIDGE=y
-          CONFIG_NETFILTER=y
-          CONFIG_BRIDGE_NETFILTER=y
-          CONFIG_NETFILTER_ADVANCED=y
-          CONFIG_NF_CONNTRACK=y
-          CONFIG_IP_NF_IPTABLES=y
-          CONFIG_IP_NF_FILTER=y
-          CONFIG_NF_NAT=y
-          CONFIG_NF_TABLES=y
-          CONFIG_IP_NF_TARGET_MASQUERADE=y
-          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
-          CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_NF_CONNTRACK_NETLINK=y
-          CONFIG_NF_NAT_REDIRECT=y
-          CONFIG_IP_ADVANCED_ROUTER=y
-          CONFIG_IP_MULTIPLE_TABLES=y
-          EOF
+          # Add all required DroidSpace options
+          add_config "CONFIG_SYSCTL=y"
+          add_config "CONFIG_SYSVIPC=y"
+          add_config "CONFIG_POSIX_MQUEUE=y"
+          add_config "CONFIG_NAMESPACES=y"
+          add_config "CONFIG_PID_NS=y"
+          add_config "CONFIG_UTS_NS=y"
+          add_config "CONFIG_IPC_NS=y"
+          add_config "CONFIG_SECCOMP=y"
+          add_config "CONFIG_SECCOMP_FILTER=y"
+          add_config "CONFIG_CGROUPS=y"
+          add_config "CONFIG_CGROUP_DEVICE=y"
+          add_config "CONFIG_CGROUP_PIDS=y"
+          add_config "CONFIG_MEMCG=y"
+          add_config "CONFIG_CGROUP_SCHED=y"
+          add_config "CONFIG_FAIR_GROUP_SCHED=y"
+          add_config "CONFIG_CGROUP_FREEZER=y"
+          add_config "CONFIG_CGROUP_NET_PRIO=y"
+          add_config "CONFIG_DEVTMPFS=y"
+          add_config "CONFIG_OVERLAY_FS=y"
+          add_config "CONFIG_TMPFS_POSIX_ACL=y"
+          add_config "CONFIG_TMPFS_XATTR=y"
+          add_config "CONFIG_FW_LOADER=y"
+          add_config "CONFIG_FW_LOADER_USER_HELPER=y"
+          add_config "CONFIG_FW_LOADER_COMPRESS=y"
+          add_config "CONFIG_NET_NS=y"
+          add_config "CONFIG_VETH=y"
+          add_config "CONFIG_BRIDGE=y"
+          add_config "CONFIG_NETFILTER=y"
+          add_config "CONFIG_BRIDGE_NETFILTER=y"
+          add_config "CONFIG_NETFILTER_ADVANCED=y"
+          add_config "CONFIG_NF_CONNTRACK=y"
+          add_config "CONFIG_IP_NF_IPTABLES=y"
+          add_config "CONFIG_IP_NF_FILTER=y"
+          add_config "CONFIG_NF_NAT=y"
+          add_config "CONFIG_NF_TABLES=y"
+          add_config "CONFIG_IP_NF_TARGET_MASQUERADE=y"
+          add_config "CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y"
+          add_config "CONFIG_NETFILTER_XT_TARGET_TCPMSS=y"
+          add_config "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
+          add_config "CONFIG_NF_CONNTRACK_NETLINK=y"
+          add_config "CONFIG_NF_NAT_REDIRECT=y"
+          add_config "CONFIG_IP_ADVANCED_ROUTER=y"
+          add_config "CONFIG_IP_MULTIPLE_TABLES=y"
 
-          # Disable Android's paranoid network (required for internet in DroidSpace)
+          # Disable paranoid network if present
           if grep -q "CONFIG_ANDROID_PARANOID_NETWORK=y" "$DEFCONFIG_PATH"; then
             sed -i 's/CONFIG_ANDROID_PARANOID_NETWORK=y/# CONFIG_ANDROID_PARANOID_NETWORK is not set/' "$DEFCONFIG_PATH"
-            echo "Disabled CONFIG_ANDROID_PARANOID_NETWORK."
+            echo "Disabled CONFIG_ANDROID_PARANOID_NETWORK"
           fi
 
           echo "Defconfig patched successfully."
 
       # ------------------------------------------------------------
-      # 7. Build the kernel using Volla's build script
+      # 8. Build the kernel using Volla's script
       # ------------------------------------------------------------
       - name: Build kernel
         run: |
           cd kernel_workspace
-
-          # The build script is usually located at kernel_device_modules-6.6/build.sh
           if [ -f "kernel_device_modules-6.6/build.sh" ]; then
             ./kernel_device_modules-6.6/build.sh
           elif [ -f "build.sh" ]; then
@@ -157,7 +159,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 8. Upload the resulting build artifacts
+      # 9. Upload artifacts
       # ------------------------------------------------------------
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
